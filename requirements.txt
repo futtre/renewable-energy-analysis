@@ -1,0 +1,5 @@
+anthropic>=0.18.1
+python-dotenv>=1.0.0
+pydantic>=2.6.1
+python-docx>=0.8.11
+fpdf>=1.7.2 
