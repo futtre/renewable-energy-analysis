@@ -6,6 +6,7 @@ from fastapi.responses import JSONResponse
 
 from app.tools.document_loader import DocumentLoader
 from app.tools.extract_key_info import ExtractKeyInfo
+from app.tools.document_summarizer import DocumentSummarizer
 
 router = APIRouter()
 
@@ -16,7 +17,7 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 @router.post("/upload/")
 async def upload_document(file: UploadFile = File(...)):
     """
-    Upload and process a document, extracting structured information about renewable energy projects
+    Upload and process a document, extracting structured information and generating a summary
     """
     # Validate file type
     allowed_extensions = ['.pdf', '.docx', '.doc']
@@ -44,9 +45,13 @@ async def upload_document(file: UploadFile = File(...)):
         if not doc_result["success"]:
             raise ValueError(f"Failed to load document: {doc_result.get('error')}")
         
-        # Extract structured information using an LLM
+        # Extract structured information using LLM
         extractor = ExtractKeyInfo()
         project_info = extractor.extract_info(doc_result["text"])
+        
+        # Generate document summary
+        summarizer = DocumentSummarizer()
+        doc_summary = summarizer.summarize(doc_result["text"])
         
         return {
             "filename": file.filename,
@@ -54,7 +59,8 @@ async def upload_document(file: UploadFile = File(...)):
             "file_type": doc_result["file_type"],
             "text_length": len(doc_result["text"]),
             "text_preview": doc_result["text"][:500] if doc_result["text"] else None,
-            "project_info": project_info.model_dump(exclude_none=True)
+            "project_info": project_info.model_dump(exclude_none=True),
+            "summary": doc_summary.model_dump(exclude_none=True)
         }
     except Exception as e:
         print(f"Error processing document: {str(e)}")
