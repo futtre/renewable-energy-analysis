@@ -3,7 +3,7 @@ import requests
 import os
 import json
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 import time
 
 # --- Configuration ---
@@ -97,6 +97,41 @@ def format_summary(summary: Dict[str, Any]) -> None:
     if summary.get("content"):
         st.markdown("**Document Summary**")
         st.markdown(summary["content"])
+
+def format_risk_flags(flags: List[str]) -> None:
+    """Format and display risk flags in a structured way"""
+    if not flags:
+        st.info("No risk flags were identified.")
+        return
+
+    st.markdown("**Risk Analysis**")
+    
+    # Group flags by category
+    categories = {
+        "MISSING INFO": [],
+        "CONTRACT RISK": [],
+        "ENVIRONMENTAL": [],
+        "PROJECT SIZE": [],
+        "PPA TERM": [],
+        "OTHER": []
+    }
+    
+    for flag in flags:
+        categorized = False
+        for category in categories.keys():
+            if flag.startswith(category):
+                categories[category].append(flag)
+                categorized = True
+                break
+        if not categorized:
+            categories["OTHER"].append(flag)
+    
+    # Display flags by category using expanders
+    for category, category_flags in categories.items():
+        if category_flags:
+            with st.expander(f"{category} ({len(category_flags)})", expanded=True):
+                for flag in category_flags:
+                    st.markdown(f"⚠️ {flag}")
 
 def poll_status(task_id: str) -> Dict[str, Any]:
     """Poll the processing status until completion or error"""
@@ -193,7 +228,7 @@ if process_button and uploaded_file is not None:
                 st.success("✅ Analysis complete!")
                 
                 # Create tabs for different sections
-                tab1, tab2 = st.tabs(["📊 Project Info", "📝 Summary"])
+                tab1, tab2, tab3 = st.tabs(["📊 Project Info", "📝 Summary", "⚠️ Risk Analysis"])
                 
                 with tab1:
                     st.markdown("### Extracted Project Information")
@@ -202,6 +237,10 @@ if process_button and uploaded_file is not None:
                 with tab2:
                     st.markdown("### Document Summary")
                     format_summary(results.get("summary", {}))
+                
+                with tab3:
+                    st.markdown("### Risk Analysis")
+                    format_risk_flags(results.get("risk_flags", []))
             
         else:
             st.error("❌ Error starting document analysis")

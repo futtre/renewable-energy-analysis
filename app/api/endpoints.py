@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from app.tools.document_loader import DocumentLoader
 from app.tools.extract_key_info import ExtractKeyInfo
 from app.tools.document_summarizer import DocumentSummarizer
+from app.tools.risk_flagger import RiskFlagger
 
 router = APIRouter()
 
@@ -36,10 +37,14 @@ def process_document(task_id: str, file_path: Path):
         project_info = extractor.extract_info(doc_result["text"])
         doc_summary = summarizer.summarize(doc_result["text"])
         
+        # Analyze for potential risks
+        risk_flags = RiskFlagger.analyze_project(project_info)
+        
         TASKS[task_id] = {
             "status": "completed",
             "project_info": project_info.model_dump(exclude_none=True),
-            "summary": {"content": doc_summary.content}
+            "summary": {"content": doc_summary.content},
+            "risk_flags": risk_flags
         }
         
     except Exception as e:
