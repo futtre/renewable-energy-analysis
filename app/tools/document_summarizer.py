@@ -1,94 +1,81 @@
-from typing import Dict, Any
-from pydantic import BaseModel, Field
+from typing import Dict, List, Optional
+from pydantic import BaseModel
 from anthropic import Anthropic
 import os
 from dotenv import load_dotenv
 import json
+import re
 
 class DocumentSummary(BaseModel):
-    """Pydantic model for structured document summary"""
-    executive_summary: str = Field(..., description="A 2-3 sentence high-level overview of the project.")
-    key_highlights: Dict[str, str] = Field(..., description="Key aspects of the project organized by category (e.g., Technology, Timeline, Participants).")
-    risks_and_considerations: list[str] = Field(default_factory=list, description="Potential risks, dependencies, or important considerations mentioned in the document.")
-    next_steps: list[str] = Field(default_factory=list, description="Any mentioned next steps, milestones, or future actions.")
+    """Simple model for document summary"""
+    content: str = ""
 
 class DocumentSummarizer:
-    """Class for generating structured summaries of renewable energy project documents using LLM"""
+    """Class for generating summaries of renewable energy project documents"""
     
     def __init__(self):
-        # Load environment variables
         load_dotenv()
-        
-        # Initialize Claude client
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY must be set in environment variables")
+            raise ValueError("ANTHROPIC_API_KEY must be set")
         self.client = Anthropic(api_key=api_key)
         
-        # Create the system prompt
-        self.system_prompt = """You are a specialized assistant for analyzing renewable energy project documents.
-        Your task is to create structured summaries that highlight the most important aspects of the project.
-        Focus on key commercial, technical, and timeline aspects that would be relevant for due diligence.
-        Be concise but comprehensive, and ensure all information is directly supported by the document.
-        If certain aspects are not mentioned in the document, leave those sections empty rather than making assumptions."""
+        self.system_prompt = """Create a concise summary of this renewable energy project document.
+        Focus on the key points and main takeaways.
+        Include important technical, commercial, and environmental aspects if present.
+        Be clear and direct in your summary."""
     
+    def _clean_text(self, text: str) -> str:
+        """Clean text by removing control characters and normalizing whitespace"""
+        # Remove or replace control characters
+        text = re.sub(r'[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', '', text)
+        # Normalize whitespace
+        text = re.sub(r'\s+', ' ', text)
+        # Strip leading/trailing whitespace
+        return text.strip()
+
+    def _clean_json_response(self, content: str) -> str:
+        """Clean the response content to ensure valid JSON"""
+        # Remove any non-JSON text before the first {
+        content = content[content.find('{'):] if '{' in content else content
+        # Remove any non-JSON text after the last }
+        content = content[:content.rfind('}')+1] if '}' in content else content
+        # Clean control characters
+        content = self._clean_text(content)
+        return content
+
     def summarize(self, text: str) -> DocumentSummary:
-        """Generate a structured summary of the document text
-        
-        Args:
-            text (str): The document text to analyze
-            
-        Returns:
-            DocumentSummary: Structured summary of the document
-            
-        Raises:
-            ValueError: If the API response cannot be parsed
-            Exception: For other errors during summarization
-        """
-        # Create the user message with the schema
-        schema_example = DocumentSummary.model_json_schema()
-        user_message = f"""Please analyze this renewable energy project document and create a structured summary according to this exact JSON schema:
-        {json.dumps(schema_example, indent=2)}
-        
-        Focus on extracting:
-        1. A clear executive summary of the project
-        2. Key highlights organized by relevant categories
-        3. Any risks or important considerations
-        4. Next steps or upcoming milestones
-        
-        Document text to analyze:
-        {text}
-        
-        Return ONLY the JSON object with the structured summary, nothing else."""
-        
+        """Generate a summary of the document text"""
         try:
-            # Call Claude API
+            # Clean input text
+            cleaned_text = self._clean_text(text)
+            
             response = self.client.messages.create(
-                model="claude-3-7-sonnet-20250219",
-                max_tokens=1500,
+                model="claude-3-sonnet-20240229",
+                max_tokens=4096,
                 messages=[{
                     "role": "user",
-                    "content": user_message
+                    "content": f"""Please provide a clear and concise summary of this document:
+
+                    {cleaned_text}
+
+                    Return the summary as a JSON object with a single 'content' field."""
                 }],
                 system=self.system_prompt
             )
             
-            # Extract JSON from response
             content = response.content[0].text
             
-            # Parse JSON and create DocumentSummary object
             try:
-                # Find JSON block in response
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                    data = json.loads(json_str)
-                    return DocumentSummary(**data)
-                else:
-                    raise ValueError("No JSON found in Claude's response")
+                # Try to parse as JSON directly first
+                cleaned_content = self._clean_json_response(content)
+                data = json.loads(cleaned_content)
+                return DocumentSummary(**data)
             except json.JSONDecodeError as e:
-                raise ValueError(f"Failed to parse JSON from Claude's response: {e}")
-            
+                print(f"JSON parsing error: {str(e)}")
+                # If JSON parsing fails, use the content directly
+                return DocumentSummary(content=self._clean_text(content))
+                
         except Exception as e:
-            raise Exception(f"Error generating summary: {e}") 
+            print(f"Error in summarize: {str(e)}")
+            raise Exception(f"Error generating summary: {str(e)}") 

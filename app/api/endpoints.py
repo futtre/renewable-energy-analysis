@@ -1,7 +1,7 @@
 from pathlib import Path
-from typing import List
-
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from typing import Dict, Any
+import uuid
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from app.tools.document_loader import DocumentLoader
@@ -14,11 +14,46 @@ router = APIRouter()
 UPLOAD_DIR = Path("uploads")
 UPLOAD_DIR.mkdir(exist_ok=True)
 
+# Store task results
+TASKS: Dict[str, Dict[str, Any]] = {}
+
+def process_document(task_id: str, file_path: Path):
+    """Background task to process the document"""
+    try:
+        # Load document text
+        doc_result = DocumentLoader.load_document(file_path)
+        if not doc_result["success"]:
+            TASKS[task_id] = {
+                "status": "error",
+                "message": f"Failed to load document: {doc_result['error']}"
+            }
+            return
+
+        # Extract structured information and generate summary
+        extractor = ExtractKeyInfo()
+        summarizer = DocumentSummarizer()
+        
+        project_info = extractor.extract_info(doc_result["text"])
+        doc_summary = summarizer.summarize(doc_result["text"])
+        
+        TASKS[task_id] = {
+            "status": "completed",
+            "project_info": project_info.model_dump(exclude_none=True),
+            "summary": {"content": doc_summary.content}
+        }
+        
+    except Exception as e:
+        TASKS[task_id] = {"status": "error", "message": str(e)}
+    finally:
+        # Clean up uploaded file
+        try:
+            file_path.unlink()
+        except Exception:
+            pass  # Ignore cleanup errors
+
 @router.post("/upload/")
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload and process a document, extracting structured information and generating a summary
-    """
+async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> Dict[str, str]:
+    """Upload a document and start processing it asynchronously"""
     # Validate file type
     allowed_extensions = ['.pdf', '.docx', '.doc']
     file_extension = Path(file.filename).suffix.lower()
@@ -26,55 +61,39 @@ async def upload_document(file: UploadFile = File(...)):
     if file_extension not in allowed_extensions:
         raise HTTPException(
             status_code=400,
-            detail=f"File type not supported. Allowed types: {', '.join(allowed_extensions)}"
+            detail=f"Unsupported file type. Allowed types: {', '.join(allowed_extensions)}"
         )
     
-    # Save the file
-    file_path = UPLOAD_DIR / file.filename
+    # Generate task ID and save file
+    task_id = str(uuid.uuid4())
+    file_path = UPLOAD_DIR / f"{task_id}{file_extension}"
+    
     try:
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
+        content = await file.read()
+        file_path.write_bytes(content)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
     
-    # Process the document
-    try:
-        # Load document text
-        doc_result = DocumentLoader.load_document(file_path)
-        if not doc_result["success"]:
-            raise ValueError(f"Failed to load document: {doc_result.get('error')}")
-        
-        # Extract structured information using LLM
-        extractor = ExtractKeyInfo()
-        project_info = extractor.extract_info(doc_result["text"])
-        
-        # Generate document summary
-        summarizer = DocumentSummarizer()
-        doc_summary = summarizer.summarize(doc_result["text"])
-        
-        return {
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "file_type": doc_result["file_type"],
-            "text_length": len(doc_result["text"]),
-            "text_preview": doc_result["text"][:500] if doc_result["text"] else None,
-            "project_info": project_info.model_dump(exclude_none=True),
-            "summary": doc_summary.model_dump(exclude_none=True)
-        }
-    except Exception as e:
-        print(f"Error processing document: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Failed to process document: {str(e)}")
+    # Initialize task and start processing
+    TASKS[task_id] = {"status": "processing"}
+    background_tasks.add_task(process_document, task_id, file_path)
+    
+    return {"task_id": task_id}
 
-@router.get("/supported-formats/")
-async def get_supported_formats() -> JSONResponse:
-    """
-    Get list of supported document formats
-    """
-    return JSONResponse(content={
+@router.get("/status/{task_id}")
+async def get_task_status(task_id: str) -> Dict[str, Any]:
+    """Get the status of a document processing task"""
+    if task_id not in TASKS:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return TASKS[task_id]
+
+@router.get("/supported-formats")
+async def get_supported_formats() -> Dict[str, list]:
+    """Get list of supported document formats"""
+    return {
         "supported_formats": [
             {"extension": ".pdf", "description": "PDF documents"},
             {"extension": ".docx", "description": "Microsoft Word documents"},
             {"extension": ".doc", "description": "Legacy Microsoft Word documents"}
         ]
-    })
+    }

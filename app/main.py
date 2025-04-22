@@ -1,18 +1,26 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+import os
 
 # Load environment variables at startup
 load_dotenv()
 
 from app.api.endpoints import router as api_router
 
-app = FastAPI(title="AI Due Diligence MVP")
+app = FastAPI(
+    title="AI Due Diligence MVP",
+    description="API for processing and analyzing renewable energy project documents",
+    version="0.1.0"
+)
 
-# Configure CORS for Streamlit frontend
+# Configure CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8501"],  # Streamlit default port
+    allow_origins=[
+        "http://localhost:8501",  # Streamlit default
+        os.getenv("FRONTEND_URL", "http://localhost:3000")  # Optional custom frontend
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -22,7 +30,10 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1", tags=["documents"])
 
 @app.get("/")
-async def root():
-    """
-    Root endpoint providing basic API information"""
-    return {"message": "Welcome to the AI Due Diligence MVP API!"}
+async def root() -> dict:
+    """Root endpoint providing basic API information"""
+    return {
+        "message": "Welcome to the AI Due Diligence MVP API!",
+        "version": "0.1.0",
+        "docs_url": "/docs"
+    }
