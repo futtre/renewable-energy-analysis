@@ -1,17 +1,27 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 import os
 
 # Load environment variables at startup
 load_dotenv()
 
 from app.api.endpoints import router as api_router
+from app.db import create_db_and_tables
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for database initialization"""
+    # Initialize database tables
+    create_db_and_tables()
+    yield
 
 app = FastAPI(
     title="AI Due Diligence MVP",
     description="API for processing and analyzing renewable energy project documents",
-    version="0.1.0"
+    version="0.1.0",
+    lifespan=lifespan
 )
 
 # Configure CORS for frontend

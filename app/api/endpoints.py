@@ -1,13 +1,15 @@
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, List
 import uuid
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks
+from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
+from sqlalchemy.orm import Session
 
 from app.tools.document_loader import DocumentLoader
 from app.tools.extract_key_info import ExtractKeyInfo
 from app.tools.document_summarizer import DocumentSummarizer
 from app.tools.risk_flagger import RiskFlagger
+from app.db import DocumentAnalysis, get_db
 
 router = APIRouter()
 
@@ -18,37 +20,104 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Store task results
 TASKS: Dict[str, Dict[str, Any]] = {}
 
-def process_document(task_id: str, file_path: Path):
-    """Background task to process the document"""
+def process_document(task_id: str, file_path: Path, db: Session):
+    """Background task to process the document and store results in database"""
+    processing_error_details: List[str] = []
+    db_record = None
+    
     try:
+        # Create initial database record
+        db_record = DocumentAnalysis(
+            original_filename=file_path.name,
+            processing_status="Processing"
+        )
+        db.add(db_record)
+        db.commit()
+        db.refresh(db_record)
+
         # Load document text
         doc_result = DocumentLoader.load_document(file_path)
         if not doc_result["success"]:
-            TASKS[task_id] = {
-                "status": "error",
-                "message": f"Failed to load document: {doc_result['error']}"
-            }
-            return
+            error_msg = f"Failed to load document: {doc_result['error']}"
+            processing_error_details.append(error_msg)
+            raise Exception(error_msg)
+
+        extracted_text = doc_result["text"]
+        db_record.extracted_text_preview = extracted_text[:500] + "..." if len(extracted_text) > 500 else extracted_text
 
         # Extract structured information and generate summary
         extractor = ExtractKeyInfo()
         summarizer = DocumentSummarizer()
         
-        project_info = extractor.extract_info(doc_result["text"])
-        doc_summary = summarizer.summarize(doc_result["text"])
+        try:
+            project_info = extractor.extract_info(extracted_text)
+        except Exception as e:
+            processing_error_details.append(f"Error extracting information: {str(e)}")
+            project_info = None
+        
+        try:
+            doc_summary = summarizer.summarize(extracted_text)
+            summary = doc_summary.content
+        except Exception as e:
+            processing_error_details.append(f"Error generating summary: {str(e)}")
+            summary = None
         
         # Analyze for potential risks
-        risk_flags = RiskFlagger.analyze_project(project_info)
+        try:
+            risk_flagger = RiskFlagger()  # Instantiate the RiskFlagger
+            risk_flags = risk_flagger.analyze_project(project_info) if project_info else []
+        except Exception as e:
+            processing_error_details.append(f"Error analyzing risks: {str(e)}")
+            risk_flags = []
+
+        # Update database record with all extracted information
+        db_record.processing_status = "Completed" if not processing_error_details else "Partial"
+        db_record.processing_notes = "; ".join(processing_error_details) if processing_error_details else "Completed successfully"
+        db_record.summary = summary
+        db_record.risk_flags = risk_flags
         
+        # Populate fields from project_info if available
+        if project_info:
+            # Use model_dump() for Pydantic v2
+            data_dict = project_info.model_dump()
+            
+            # Direct field mappings (field names match exactly)
+            direct_fields = [
+                'project_name', 'project_type', 'capacity_mw', 'location_address',
+                'project_area_size', 'technology_details', 'number_of_units',
+                'developer_name', 'purchaser_or_offtaker', 'seller_or_provider',
+                'key_counterparties', 'agreement_type', 'agreement_effective_date',
+                'term_length_years', 'contract_price_details',
+                'guaranteed_output_or_availability', 'liquidated_damages_mention',
+                'delivery_point', 'environmental_attributes_ownership',
+                'lead_regulatory_agency', 'assessment_type', 'key_permits_mentioned',
+                'key_environmental_concerns', 'mitigation_mentioned', 'key_project_dates'
+            ]
+            
+            for field in direct_fields:
+                if field in data_dict:
+                    setattr(db_record, field, data_dict[field])
+
+        # Commit changes to database
+        db.commit()
+        db.refresh(db_record)
+        
+        # Update task status
         TASKS[task_id] = {
-            "status": "completed",
-            "project_info": project_info.model_dump(exclude_none=True),
-            "summary": {"content": doc_summary.content},
-            "risk_flags": risk_flags
+            "status": "completed" if not processing_error_details else "partial",
+            "project_info": project_info.model_dump() if project_info else {},
+            "summary": {"content": summary} if summary else {},
+            "risk_flags": risk_flags,
+            "processing_notes": db_record.processing_notes
         }
         
     except Exception as e:
-        TASKS[task_id] = {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        if db_record:
+            db_record.processing_status = "Failed"
+            db_record.processing_notes = error_msg
+            db.commit()
+        TASKS[task_id] = {"status": "error", "message": error_msg}
     finally:
         # Clean up uploaded file
         try:
@@ -57,7 +126,11 @@ def process_document(task_id: str, file_path: Path):
             pass  # Ignore cleanup errors
 
 @router.post("/upload/")
-async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = File(...)) -> Dict[str, str]:
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db)
+) -> Dict[str, str]:
     """Upload a document and start processing it asynchronously"""
     # Validate file type
     allowed_extensions = ['.pdf', '.docx', '.doc']
@@ -81,7 +154,7 @@ async def upload_document(background_tasks: BackgroundTasks, file: UploadFile = 
     
     # Initialize task and start processing
     TASKS[task_id] = {"status": "processing"}
-    background_tasks.add_task(process_document, task_id, file_path)
+    background_tasks.add_task(process_document, task_id, file_path, db)
     
     return {"task_id": task_id}
 
@@ -101,4 +174,73 @@ async def get_supported_formats() -> Dict[str, list]:
             {"extension": ".docx", "description": "Microsoft Word documents"},
             {"extension": ".doc", "description": "Legacy Microsoft Word documents"}
         ]
+    }
+
+@router.get("/analyses/")
+async def get_analyses(db: Session = Depends(get_db)):
+    """Get list of all document analyses"""
+    analyses = db.query(DocumentAnalysis).order_by(DocumentAnalysis.created_at.desc()).all()
+    return [{
+        "id": analysis.id,
+        "filename": analysis.original_filename,
+        "status": analysis.processing_status,
+        "project_name": analysis.project_name,
+        "project_type": analysis.project_type,
+        "capacity_mw": analysis.capacity_mw,
+        "created_at": analysis.created_at,
+        "processing_notes": analysis.processing_notes
+    } for analysis in analyses]
+
+@router.get("/analyses/{analysis_id}")
+async def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
+    """Get detailed information for a specific analysis"""
+    analysis = db.query(DocumentAnalysis).filter(DocumentAnalysis.id == analysis_id).first()
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    
+    return {
+        "id": analysis.id,
+        "metadata": {
+            "filename": analysis.original_filename,
+            "status": analysis.processing_status,
+            "created_at": analysis.created_at,
+            "processing_notes": analysis.processing_notes
+        },
+        "project_info": {
+            "name": analysis.project_name,
+            "type": analysis.project_type,
+            "capacity_mw": analysis.capacity_mw,
+            "location": analysis.location_address,
+            "area_size": analysis.project_area_size,
+            "technology": analysis.technology_details,
+            "units": analysis.number_of_units
+        },
+        "parties": {
+            "developer": analysis.developer_name,
+            "offtaker": analysis.purchaser_or_offtaker,
+            "provider": analysis.seller_or_provider,
+            "counterparties": analysis.key_counterparties
+        },
+        "ppa_terms": {
+            "agreement_type": analysis.agreement_type,
+            "effective_date": analysis.agreement_effective_date,
+            "term_years": analysis.term_length_years,
+            "price_details": analysis.contract_price_details,
+            "guaranteed_output": analysis.guaranteed_output_or_availability,
+            "liquidated_damages": analysis.liquidated_damages_mention,
+            "delivery_point": analysis.delivery_point,
+            "environmental_attributes": analysis.environmental_attributes_ownership
+        },
+        "environmental": {
+            "agency": analysis.lead_regulatory_agency,
+            "assessment_type": analysis.assessment_type,
+            "permits": analysis.key_permits_mentioned,
+            "concerns": analysis.key_environmental_concerns,
+            "mitigation_mentioned": analysis.mitigation_mentioned
+        },
+        "dates": analysis.key_project_dates,
+        "analysis_results": {
+            "summary": analysis.summary,
+            "risk_flags": analysis.risk_flags
+        }
     }
