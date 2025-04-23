@@ -1,0 +1,92 @@
+# File: app/config/risk_rules.yaml
+# Description: Configuration file defining rules for the RiskFlagger tool.
+
+# Each rule has an ID, a description (used for the flag text),
+# a field from ProjectInfo to check, a condition, and a value to check against.
+# Conditions can be: less_than, greater_than, equals, not_equals, contains, not_contains, is_true, is_false, is_missing, is_present
+
+rules:
+  - id: R001
+    description: "PPA Term Potentially Short (< {value} years)"
+    field: term_length_years
+    condition: less_than
+    value: 15
+
+  - id: R002
+    description: "PPA Term Format Unclear - Manual Review Needed"
+    field: term_length_years
+    condition: parsing_failed
+    value: null
+
+  - id: R003
+    description: "Environmental Attributes (RECs) Ownership potentially with Buyer/Offtaker - Verify"
+    field: environmental_attributes_ownership
+    condition: contains_any
+    value: ["buyer", "purchaser", "offtaker"]
+
+  - id: R004
+    description: "Environmental Attributes (RECs) Ownership Unclear - Verify"
+    field: environmental_attributes_ownership
+    condition: not_contains_all
+    value: ["seller", "provider"]
+
+  - id: R005
+    description: "Liquidated Damages Clause Mentioned - Review Terms"
+    field: liquidated_damages_mention
+    condition: is_true
+
+  - id: R006
+    description: "Liquidated Damages Status Unclear - Verify Presence/Absence"
+    field: liquidated_damages_mention
+    condition: is_missing
+    depends_on_field: agreement_type
+
+  - id: R007
+    description: "Key Environmental Concerns Identified ({count}) - Review Details: {details}"
+    field: key_environmental_concerns
+    condition: is_present
+
+  - id: R008
+    description: "Environmental Concerns Identified but Mitigation Measures Not Explicitly Mentioned - Verify"
+    field: mitigation_mentioned
+    condition: is_false
+    depends_on_field: key_environmental_concerns
+
+  - id: R009
+    description: "Mitigation Measures Mentioned for Environmental Concerns - Review Adequacy"
+    field: mitigation_mentioned
+    condition: is_true
+    depends_on_field: key_environmental_concerns
+
+  - id: R010
+    description: "Project Capacity Relatively Small (< {value} MW)"
+    field: capacity_mw
+    condition: less_than
+    value: 5.0
+
+  - id: R011
+    description: "Project Capacity Format Unclear"
+    field: capacity_mw
+    condition: parsing_failed
+
+  - id: R012
+    description: "Project Name Missing"
+    field: project_name
+    condition: is_missing
+
+  - id: R013
+    description: "Project Capacity Missing"
+    field: capacity_mw
+    condition: is_missing
+
+  - id: R014
+    description: "Purchaser/Offtaker Missing in PPA Context"
+    field: purchaser_or_offtaker
+    condition: is_missing
+    depends_on_field: agreement_type
+
+  - id: R015
+    description: "PPA Term Length Missing"
+    field: term_length_years
+    condition: is_missing
+    depends_on_field: agreement_type
