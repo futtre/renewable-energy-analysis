@@ -9,6 +9,7 @@ from app.tools.document_loader import DocumentLoader
 from app.tools.extract_key_info import ExtractKeyInfo
 from app.tools.document_summarizer import DocumentSummarizer
 from app.tools.risk_flagger import RiskFlagger
+from app.tools.external_info_fetcher import ExternalInfoFetcher
 from app.db import DocumentAnalysis, get_db
 
 router = APIRouter()
@@ -20,8 +21,8 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Store task results
 TASKS: Dict[str, Dict[str, Any]] = {}
 
-def process_document(task_id: str, file_path: Path, db: Session):
-    """Background task to process the document and store results in database"""
+async def process_document(task_id: str, file_path: Path, db: Session):
+    """Process the document and store results in database"""
     processing_error_details: List[str] = []
     db_record = None
     
@@ -34,6 +35,9 @@ def process_document(task_id: str, file_path: Path, db: Session):
         db.add(db_record)
         db.commit()
         db.refresh(db_record)
+
+        # Update task status to show processing started
+        TASKS[task_id] = {"status": "processing", "analysis_id": db_record.id}
 
         # Load document text
         doc_result = DocumentLoader.load_document(file_path)
@@ -64,7 +68,7 @@ def process_document(task_id: str, file_path: Path, db: Session):
         
         # Analyze for potential risks
         try:
-            risk_flagger = RiskFlagger()  # Instantiate the RiskFlagger
+            risk_flagger = RiskFlagger()
             risk_flags = risk_flagger.analyze_project(project_info) if project_info else []
         except Exception as e:
             processing_error_details.append(f"Error analyzing risks: {str(e)}")
@@ -76,12 +80,8 @@ def process_document(task_id: str, file_path: Path, db: Session):
         db_record.summary = summary
         db_record.risk_flags = risk_flags
         
-        # Populate fields from project_info if available
         if project_info:
-            # Use model_dump() for Pydantic v2
             data_dict = project_info.model_dump()
-            
-            # Direct field mappings (field names match exactly)
             direct_fields = [
                 'project_name', 'project_type', 'capacity_mw', 'location_address',
                 'project_area_size', 'technology_details', 'number_of_units',
@@ -98,7 +98,23 @@ def process_document(task_id: str, file_path: Path, db: Session):
                 if field in data_dict:
                     setattr(db_record, field, data_dict[field])
 
-        # Commit changes to database
+            # Fetch external information about entities
+            try:
+                info_fetcher = ExternalInfoFetcher()
+                
+                # Fetch developer info
+                if db_record.developer_name:
+                    developer_summary = await info_fetcher.fetch_and_summarize_entity_info(db_record.developer_name)
+                    db_record.developer_external_summary = developer_summary
+                
+                # Fetch offtaker info
+                if db_record.purchaser_or_offtaker:
+                    offtaker_summary = await info_fetcher.fetch_and_summarize_entity_info(db_record.purchaser_or_offtaker)
+                    db_record.offtaker_external_summary = offtaker_summary
+                
+            except Exception as e:
+                processing_error_details.append(f"Error fetching external info: {str(e)}")
+
         db.commit()
         db.refresh(db_record)
         
@@ -106,9 +122,20 @@ def process_document(task_id: str, file_path: Path, db: Session):
         TASKS[task_id] = {
             "status": "completed" if not processing_error_details else "partial",
             "project_info": project_info.model_dump() if project_info else {},
-            "summary": {"content": summary} if summary else {},
-            "risk_flags": risk_flags,
-            "processing_notes": db_record.processing_notes
+            "summary": {"content": summary} if summary else {"content": ""},
+            "risk_flags": risk_flags if risk_flags else [],
+            "processing_notes": db_record.processing_notes,
+            "analysis_id": db_record.id,
+            "external_info": {
+                "developer": {
+                    "name": db_record.developer_name,
+                    "summary": db_record.developer_external_summary
+                } if db_record.developer_name else None,
+                "offtaker": {
+                    "name": db_record.purchaser_or_offtaker,
+                    "summary": db_record.offtaker_external_summary
+                } if db_record.purchaser_or_offtaker else None
+            } if (db_record.developer_name or db_record.purchaser_or_offtaker) else {}
         }
         
     except Exception as e:
@@ -117,13 +144,22 @@ def process_document(task_id: str, file_path: Path, db: Session):
             db_record.processing_status = "Failed"
             db_record.processing_notes = error_msg
             db.commit()
-        TASKS[task_id] = {"status": "error", "message": error_msg}
+        TASKS[task_id] = {
+            "status": "error",
+            "message": error_msg,
+            "project_info": {},
+            "summary": {"content": ""},
+            "risk_flags": [],
+            "processing_notes": error_msg,
+            "analysis_id": db_record.id if db_record else None,
+            "external_info": {}
+        }
     finally:
         # Clean up uploaded file
         try:
             file_path.unlink()
         except Exception:
-            pass  # Ignore cleanup errors
+            pass
 
 @router.post("/upload/")
 async def upload_document(
@@ -216,8 +252,14 @@ async def get_analysis(analysis_id: int, db: Session = Depends(get_db)):
             "units": analysis.number_of_units
         },
         "parties": {
-            "developer": analysis.developer_name,
-            "offtaker": analysis.purchaser_or_offtaker,
+            "developer": {
+                "name": analysis.developer_name,
+                "external_summary": analysis.developer_external_summary
+            } if analysis.developer_name else None,
+            "offtaker": {
+                "name": analysis.purchaser_or_offtaker,
+                "external_summary": analysis.offtaker_external_summary
+            } if analysis.purchaser_or_offtaker else None,
             "provider": analysis.seller_or_provider,
             "counterparties": analysis.key_counterparties
         },

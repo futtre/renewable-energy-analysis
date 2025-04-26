@@ -1,7 +1,7 @@
 from datetime import datetime, UTC
 import os
 import json
-from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, TypeDecorator
+from sqlalchemy import Column, Integer, String, DateTime, Text, Float, Boolean, TypeDecorator, JSON
 from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
@@ -40,16 +40,18 @@ class DocumentAnalysis(Base):
     technology_details = Column(Text, nullable=True)
     number_of_units = Column(Integer, nullable=True)
 
-    # Parties Involved
+    # Parties Involved with External Info
     developer_name = Column(String, nullable=True, index=True)
+    developer_external_summary = Column(Text, nullable=True)  # External info about developer
     purchaser_or_offtaker = Column(String, nullable=True, index=True)
+    offtaker_external_summary = Column(Text, nullable=True)  # External info about offtaker
     seller_or_provider = Column(String, nullable=True, index=True)
     key_counterparties = Column(JSONEncodedDict, nullable=True)  # Store lists as JSON
 
     # PPA Specific Terms
     agreement_type = Column(String, nullable=True)
     agreement_effective_date = Column(String, nullable=True)  # Store as string for flexibility
-    term_length_years = Column(String, nullable=True)  # Store as string due to varied formats ('20', 'twenty (20)')
+    term_length_years = Column(Float, nullable=True)
     contract_price_details = Column(Text, nullable=True)
     guaranteed_output_or_availability = Column(Text, nullable=True)
     liquidated_damages_mention = Column(Boolean, nullable=True)
@@ -59,16 +61,16 @@ class DocumentAnalysis(Base):
     # EIA/Permitting Specific Terms
     lead_regulatory_agency = Column(String, nullable=True)
     assessment_type = Column(String, nullable=True)
-    key_permits_mentioned = Column(JSONEncodedDict, nullable=True)  # Changed from JSON to JSONEncodedDict
-    key_environmental_concerns = Column(JSONEncodedDict, nullable=True)  # Changed from JSON to JSONEncodedDict
+    key_permits_mentioned = Column(JSONEncodedDict, nullable=True)  # Store as JSON-encoded text
+    key_environmental_concerns = Column(JSONEncodedDict, nullable=True)  # Store as JSON-encoded text
     mitigation_mentioned = Column(Boolean, nullable=True)
 
     # Key Dates (Consolidated)
-    key_project_dates = Column(JSONEncodedDict, nullable=True)  # Changed from JSON to JSONEncodedDict
+    key_project_dates = Column(JSONEncodedDict, nullable=True)  # Store as JSON-encoded text
 
     # --- Analysis Outputs ---
     summary = Column(Text, nullable=True)
-    risk_flags = Column(JSONEncodedDict, nullable=True)  # Changed from JSON to JSONEncodedDict
+    risk_flags = Column(JSONEncodedDict, nullable=True)  # Store as JSON-encoded text
     extracted_text_preview = Column(Text, nullable=True)  # Store the first 500 chars of extracted text
 
     # --- Timestamps ---
